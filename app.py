@@ -1,82 +1,202 @@
 import streamlit as st
 import pandas as pd
-import easyocr 
-import datetime
+import easyocr
+import cv2
 import os
-from PIL import Image
+import re
+import time
 import numpy as np
-import certifi
+import pytz
+
+from PIL import Image
+from datetime import datetime
+
 import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
 
-import pytz
-from datetime import datetime
-
-tz_jkt = pytz.timezone('Asia/Jakarta')
-
-now = datetime.now(tz_jkt)
 
 # ================= CONFIG =================
+st.set_page_config(
+    page_title="Flow Meter Recording",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+
 EXCEL_AIR = "meteran_air.xlsx"
 EXCEL_LISTRIK = "meteran_listrik.xlsx"
 UPLOAD_FOLDER = "uploads"
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+
+# ================= TIMEZONE =================
+tz_jkt = pytz.timezone("Asia/Jakarta")
+
+
 # ================= OCR =================
 @st.cache_resource
 def load_reader():
-    return easyocr.Reader(['en'], gpu=False)
+    return easyocr.Reader(
+        ['en'],
+        gpu=False
+    )
+
 
 reader = load_reader()
 
+
 def advanced_pre_process(img_np):
-    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(8,8))
+    """
+    Logika OCR sama seperti laptop lama:
+    CLAHE + Gaussian Blur
+    """
+    gray = cv2.cvtColor(
+        img_np,
+        cv2.COLOR_RGB2GRAY
+    )
+
+    clahe = cv2.createCLAHE(
+        clipLimit=5.0,
+        tileGridSize=(8, 8)
+    )
+
     enhanced = clahe.apply(gray)
-    return cv2.GaussianBlur(enhanced, (3, 3), 0)
+
+    return cv2.GaussianBlur(
+        enhanced,
+        (3, 3),
+        0
+    )
+
 
 def robust_extract_logic(text_list):
+    """
+    Logika OCR lama yang paling stabil
+    """
     full_text = " ".join(text_list).upper()
 
-    for unit in ["KWH","KVARH","M3/H","M3","KVAR"]:
-        full_text = full_text.replace(unit,"")
+    # hapus satuan
+    for unit in [
+        "KWH",
+        "KVARH",
+        "M3/H",
+        "M3",
+        "KVAR"
+    ]:
+        full_text = full_text.replace(unit, "")
 
+    # mapping karakter OCR error
     mapping = {
-        'O':'0','D':'0','Q':'0',
-        'B':'8','S':'5',
-        'I':'1','L':'1',
-        'T':'7','Z':'2',
-        'G':'6','A':'4'
+        "O": "0",
+        "D": "0",
+        "Q": "0",
+        "B": "8",
+        "S": "5",
+        "I": "1",
+        "L": "1",
+        "T": "7",
+        "Z": "2",
+        "G": "6",
+        "A": "4"
     }
 
-    for k,v in mapping.items():
-        full_text = full_text.replace(k,v)
+    for k, v in mapping.items():
+        full_text = full_text.replace(k, v)
 
+    # koma jadi titik
     full_text = full_text.replace(",", ".")
 
-    # 🔥 FIX OCR BIAR TIDAK ERROR
-    pattern = re.findall(r'\d[\d\s]{3,10}(?:[\.,]\d{1,3})?', full_text)
-    pattern = [p.replace(" ", "") for p in pattern]
+    # regex angka meteran utama
+    pattern = re.findall(
+        r"\d{5,8}(?:\.\d{1,3})?",
+        full_text
+    )
 
     return max(pattern, key=len) if pattern else "Cek Foto"
 
-# ================= SAVE =================
+
+# ================= SAVE DATA =================
 def save_data(df, jenis):
-    file_path = EXCEL_AIR if jenis == "Air" else EXCEL_LISTRIK
-    df_save = df[["Tanggal", "Nama Meteran", "Angka Meteran"]].copy()
+    """
+    Excel hanya:
+    - Tanggal
+    - Nama Meteran
+    - Angka Meteran
 
-    with pd.ExcelWriter(file_path, engine='xlsxwriter') as writer:
-        df_save.to_excel(writer, index=False)
+    Foto tidak masuk Excel
+    """
+    file_path = (
+        EXCEL_AIR
+        if jenis == "Air"
+        else EXCEL_LISTRIK
+    )
 
-# ================= LOAD =================
+    # pastikan hanya kolom excel
+    df_save = df.copy()
+
+    if "Foto" not in df_save.columns:
+        df_save["Foto"] = ""
+
+    df_excel = df_save[
+        [
+            "Tanggal",
+            "Nama Meteran",
+            "Angka Meteran"
+        ]
+    ].copy()
+
+    with pd.ExcelWriter(
+        file_path,
+        engine="xlsxwriter"
+    ) as writer:
+        df_excel.to_excel(
+            writer,
+            index=False
+        )
+
+
+# ================= LOAD DATA =================
 def load_data(jenis):
-    file_path = EXCEL_AIR if jenis == "Air" else EXCEL_LISTRIK
+    """
+    Load Excel + pastikan kolom Foto tetap ada
+    supaya UI tidak error
+    """
+    file_path = (
+        EXCEL_AIR
+        if jenis == "Air"
+        else EXCEL_LISTRIK
+    )
 
     if os.path.exists(file_path):
-        return pd.read_excel(file_path, dtype=str)
+        df = pd.read_excel(
+            file_path,
+            dtype=str
+        )
+
+        # wajib ada kolom Foto
+        if "Foto" not in df.columns:
+            df["Foto"] = ""
+
+        # wajib ada semua kolom dasar
+        for col in [
+            "Tanggal",
+            "Nama Meteran",
+            "Angka Meteran"
+        ]:
+            if col not in df.columns:
+                df[col] = ""
+
+        return df
+
     else:
-        return pd.DataFrame(columns=["Tanggal","Nama Meteran","Angka Meteran","Foto"])
+        return pd.DataFrame(
+            columns=[
+                "Tanggal",
+                "Nama Meteran",
+                "Angka Meteran",
+                "Foto"
+            ]
+        )
 
 # --- 2. Daftar Nama Meteran ---
 list_meteran_air = [
@@ -178,7 +298,7 @@ list_meteran_air = [
     "96. PASTEURIZER STEAM",
     "97. BOTTLE WASHER",
     "98. WK 1 STEAM METER",
-    "99. WK 2 STEAM METER"
+    "99. WK 2 STEAM METER",
     "100. WTP STEAM METER",
     "101. RACKING PLANT",
     "102. WTP CAUSTIC METER",
@@ -218,42 +338,42 @@ list_meteran_listrik = [
     "9. AIR COMP 1 E20 X 30",
     "10. AIR COMP 2 E23 X 30",
     "11. AIR COMP 3 E26 X 30",
-    "12. STEAM BOILERS E10 X 80",
+    "12. AIR COMP 4",
     "13. NH3 COMP 1 E13 X 60",
     "14. NH3 COMP 2 E14 X 120",
     "15. NH3 COMP 3 E15 X 120",
-    "16. COOLING INSTALLATION E16 X 80",
-    "17. CO2 RECUPERATION E33 X 120",
-    "18. WATER TREATMENT W3 X 80",
-    "19. WORKSHOP S1 X 50",
-    "20. DEEPWELL 1 AQUADUCT X 120",
-    "21. DEEPWELL 2 FISHPOND V8 X 30",
-    "22. DEEPWELL 3 AWANG-AWANG X 40",
-    "23. DEEPWELL 4 JATILANGKUNG X 60",
-    "24. DEEPWELL 5 RIVER W5 X 30",
-    "25. DEEPWELL 6 FRONT OFFICE",
-    "26. DEEPWELL 7 TEMPURAN X 80",
-    "27. WWTP LINE POWER V7 X 50",
-    "28. CAUSTIC RECUPERATION E9 X 50",
-    "29. BATTERY CHARGER E34 X 30",
-    "30. RACKING PLANT B44 X 30",
-    "31. BOTTLING LINE POWER B5 X 120",
-    "32. BOTTLE WASHER B24 X 80",
-    "33. PASTEURIZER B31 X 80",
-    "34. MALT / SILO M1 X 50,"
-    "35. BREWHOUSE CONTROL Z8 X 120",
-    "36. CELLAR POWER Z21 X 50",
-    "37. BREWHOUSE POWER Z28 X 80",
-    "38. BREWHOUSE POWER Z26 X 50",
-    "39. BREWHOUSE POWER Z26 X 50",
-    "40. LWBP X 6000",
-    "41. WBP X 6000",
-    "42. KVARH X 6000",
+    "16. NH3 COMP 4",
+    "17. NH3 COMP 5",
+    "18. COOLING INSTALLATION E16 X 80",
+    "19. COOLING INSTASI BARU",
+    "20. CO2 RECUPERATION E33 X 120",
+    "21. CO2 PLANT",
+    "22. BD PLAYER 1",
+    "23. BD PLAYER 2",
+    "24. STEAM BOILER E10 X 80",
+    "25 WATER TREATMENT W3 X 80",
+    "26. WORKSHOP S1 X 50",
+    "27. WET AREA",
+    "28. 8",
+    "29. DEEPWELL 1 AQUADUCT X 120",
+    "30. DEEPWELL 2 FISHPOND V8 X 30",
+    "31. WWTP LINE POWER V7 X 50",
+    "32. CAUSTIC RECUPERATION E9 X 50",
+    "33. BATTERY CHARGER E34 X 30",
+    "34. RACKING PLANT B44 X 30",
+    "35. BOTTLING LINE POWER B5 X 120",
+    "36. PASTEURIZER B31 X 80",
+    "37. MALT / SILO M1 X 50,"
+    "38. BREWHOUSE CONTROL Z8 X 120",
+    "39. CELLAR POWER Z21 X 50",
+    "40. BREWHOUSE POWER Z28 X 80",
+    "41. BREWHOUSE POWER Z26 X 50",
+    "42. BREWHOUSE POWER Z22 X 50",
     "43. MAIN KWH ENG ROOM E2.2 X 500",
     "44. Cos Enginee Room",
     "45. MAIN KWH BOTTLING B2.2 X 500",
     "46. Cos Bottling Room (min 0.95)",
-    "47. MAIN KWH OFFICE E2.2 X 500",
+    "47. MAIN KWH OFFICE T2.3 X 500",
     "48. Cos Office min 0.95",
     "49. MAIN KWH B & C Z2.4 X 500",
     "50. Cos B & C (min 0.95),"
@@ -261,6 +381,30 @@ list_meteran_listrik = [
     "52. Cos WWTP (min 0.95),"
     "53. FULL STORE NEW LIGHTING",
     "54. CO2 COMPRESSOR",
+    "55. PANEL KUNZEL",
+    "56. PANEL BMF",
+    "57. PANEL PLN KWH",
+    "58. PANEL PLN KVRH",
+    "59. KWH PLN MBI KVARH",
+    "60. KWH PLN MBI TOTAL",
+    "61. KWH PLN MBI LBP",
+    "62. KWH PLN MBI BP",
+    "63. KWH PLN TPI KVARH",
+    "64. KWH PLN TPI TOTAL",
+    "65. KWH PLN TPI LBP",
+    "66. KWH PLN TPI BP",
+    "67. MASTER BREWING",
+    "68. MASTER PACKAGING",
+    "69. 1.1",
+    "70. 2.2",
+    "71. 2.3",
+    "72. 2.4",
+    "73. 3.2",
+    "74. 4.1",
+    "75. 4.2",
+    "76. 4.3",
+    "77. 4.4",
+    "78. 4.6",
 ]
 
 
@@ -270,29 +414,36 @@ st.title("📟 Flow Meter Recording")
 col1, col2 = st.columns(2)
 
 with col1:
-    jenis_meteran = st.selectbox("Jenis Meteran", ["Air", "Listrik"])
+    jenis_meteran = st.selectbox(
+        "Jenis Meteran",
+        ["Air", "Listrik"]
+    )
 
 with col2:
     if jenis_meteran == "Air":
-        nama_meteran = st.selectbox("Nama Meteran", list_meteran_air)
+        nama_meteran = st.selectbox(
+            "Nama Meteran",
+            list_meteran_air
+        )
     else:
-        nama_meteran = st.selectbox("Nama Meteran", list_meteran_listrik)
+        nama_meteran = st.selectbox(
+            "Nama Meteran",
+            list_meteran_listrik
+        )
 
 st.divider()
 
+
 # ================= INPUT FOTO =================
-tab1, tab2 = st.tabs(["📸 Kamera", "📁 Galeri"])
-files = []
+tab1 = st.tabs(["📁 Upload"])[0]
 
 with tab1:
-    cam = st.camera_input("Ambil foto meteran")
-    if cam:
-        files.append(cam)
+    files = st.file_uploader(
+        "Upload gambar",
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files=True
+    )
 
-with tab2:
-    upload = st.file_uploader("Upload foto", type=['jpg','jpeg','png'], accept_multiple_files=True)
-    if upload:
-        files.extend(upload)
 
 # ================= PROSES OCR =================
 if files:
@@ -301,38 +452,63 @@ if files:
         st.warning("Pilih nama meteran dulu!")
         st.stop()
 
-    now = datetime.now()
+    now = datetime.now(tz_jkt)
 
     for f in files:
         try:
-            fname = f.name if hasattr(f,'name') else f"{int(time.time())}.jpg"
+            # nama file
+            fname = (
+                f.name
+                if hasattr(f, "name")
+                else f"{int(time.time())}.jpg"
+            )
 
-            img = Image.open(f)
-            img = img.resize((600,600))
+            # buka gambar
+            img = Image.open(f).convert("RGB")
 
-            path = os.path.join(UPLOAD_FOLDER, fname)
+            # resize stabil seperti laptop lama
+            img = img.resize((600, 600))
+
+            # simpan foto
+            path = os.path.join(
+                UPLOAD_FOLDER,
+                fname
+            )
             img.save(path)
 
-            processed = advanced_pre_process(np.array(img))
-            result = reader.readtext(processed, detail=0)
+            # preprocess OCR (sama seperti laptop lama)
+            img_np = np.array(img)
+            processed = advanced_pre_process(img_np)
 
-            # DEBUG (boleh dihapus nanti)
-            st.write("DEBUG OCR:", result)
+            # OCR
+            result = reader.readtext(
+                processed,
+                detail=0
+            )
 
+            # ambil angka meteran
             angka = robust_extract_logic(result)
 
-        except:
+        except Exception as e:
+            st.error(f"OCR Error: {e}")
             angka = "Error OCR"
 
         st.divider()
 
-        colA, colB = st.columns([1,1])
+        colA, colB = st.columns([1, 1])
 
         with colA:
-            st.image(img, caption="Foto Meteran")
+            st.image(
+                img,
+                caption="Foto Meteran"
+            )
 
         with colB:
-            tgl = st.text_input("Tanggal", value=now.strftime("%d-%m-%Y"), key=f"tgl_{fname}")
+            tgl = st.text_input(
+                "Tanggal",
+                value=now.strftime("%d-%m-%Y"),
+                key=f"tgl_{fname}"
+            )
 
             angka_final = st.text_input(
                 "Angka Meteran (Edit jika salah)",
@@ -340,13 +516,19 @@ if files:
                 key=f"angka_{fname}"
             )
 
-            if st.button("✅ KONFIRMASI & SIMPAN", key=f"save_{fname}"):
+            if st.button(
+                "✅ KONFIRMASI & SIMPAN",
+                key=f"save_{fname}"
+            ):
 
                 if angka_final.strip() == "":
                     st.warning("Angka kosong!")
                     st.stop()
 
-                if not re.match(r'^\d+(\.\d+)?$', angka_final):
+                if not re.match(
+                    r"^\d+(\.\d+)?$",
+                    angka_final
+                ):
                     st.warning("Format angka salah!")
                     st.stop()
 
@@ -357,57 +539,125 @@ if files:
                     "Foto": fname
                 }])
 
-                df_old = load_data(jenis_meteran)
-                df = pd.concat([df_old, data_baru], ignore_index=True)
+                df_old = load_data(
+                    jenis_meteran
+                )
 
-                save_data(df, jenis_meteran)
+                df = pd.concat(
+                    [df_old, data_baru],
+                    ignore_index=True
+                )
 
-                st.success(f"Data {nama_meteran} tersimpan!")
+                save_data(
+                    df,
+                    jenis_meteran
+                )
+
+                st.success(
+                    f"Data {nama_meteran} berhasil disimpan!"
+                )
+
                 st.rerun()
 
+
 # ================= HISTORI =================
+st.divider()
+st.subheader("📊 Histori Pencatatan")
+
 df_db = load_data(jenis_meteran)
 
 if not df_db.empty:
-    st.divider()
-    st.subheader("📊 Histori Pencatatan")
 
-    st.dataframe(df_db.iloc[::-1], use_container_width=True)
+    st.dataframe(
+        df_db[
+            [
+                "Tanggal",
+                "Nama Meteran",
+                "Angka Meteran"
+            ]
+        ],
+        use_container_width=True
+    )
 
-    # FOTO SESUAI DATA
-    for i, row in df_db.iloc[::-1].iterrows():
-        with st.expander(f"{row['Tanggal']} | {row['Nama Meteran']}"):
-            try:
-                path = os.path.join(UPLOAD_FOLDER, row.get("Foto",""))
-                if os.path.exists(path):
-                    st.image(path, width=300)
-            except:
-                pass
+    # preview foto sesuai data
+    for i, row in df_db.iterrows():
+        with st.expander(
+            f"{row['Tanggal']} | {row['Nama Meteran']}"
+        ):
+            st.write(
+                f"**Angka Meteran:** {row['Angka Meteran']}"
+            )
 
-    # ================= HAPUS =================
+            foto_file = row.get(
+                "Foto",
+                ""
+            )
+
+            path = os.path.join(
+                UPLOAD_FOLDER,
+                str(foto_file)
+            )
+
+            if (
+                foto_file
+                and os.path.exists(path)
+            ):
+                st.image(
+                    path,
+                    width=300
+                )
+            else:
+                st.info(
+                    "Foto tidak tersedia"
+                )
+
+    # ================= HAPUS DATA =================
     st.divider()
     st.subheader("🗑️ Hapus Data")
 
     idx = st.selectbox(
         "Pilih data",
         df_db.index,
-        format_func=lambda x: f"{df_db.loc[x,'Tanggal']} | {df_db.loc[x,'Nama Meteran']}"
+        format_func=lambda x:
+            f"{df_db.loc[x, 'Tanggal']} | "
+            f"{df_db.loc[x, 'Nama Meteran']} | "
+            f"{df_db.loc[x, 'Angka Meteran']}"
     )
 
     if st.button("❌ Hapus Data"):
         df_db = df_db.drop(idx)
-        save_data(df_db, jenis_meteran)
-        st.warning("Data berhasil dihapus!")
+
+        save_data(
+            df_db,
+            jenis_meteran
+        )
+
+        st.warning(
+            "Data berhasil dihapus!"
+        )
+
         st.rerun()
 
-    # ================= DOWNLOAD =================
+    # ================= DOWNLOAD EXCEL =================
     st.divider()
 
-    file_path = EXCEL_AIR if jenis_meteran == "Air" else EXCEL_LISTRIK
+    file_path = (
+        EXCEL_AIR
+        if jenis_meteran == "Air"
+        else EXCEL_LISTRIK
+    )
 
-    with open(file_path, "rb") as f:
-        st.download_button(
-            "📥 Download Excel",
-            data=f,
-            file_name=file_path
-        )
+    if os.path.exists(file_path):
+        with open(file_path, "rb") as f:
+            st.download_button(
+                "📥 Download Excel",
+                data=f,
+                file_name=file_path,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+
+else:
+    st.info(
+        "Belum ada data tersimpan."
+    )

@@ -1,9 +1,12 @@
 streamlit
 pandas
-opencv-python-headless
-xlswriter
-openpyxl
 easyocr
+opencv-python
 pillow
-pytz
 numpy
+pytz
+openpyxl
+xlsxwriter
+torch
+torchvision
+torchaudio
