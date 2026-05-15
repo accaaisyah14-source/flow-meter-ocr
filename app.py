@@ -153,6 +153,7 @@ def save_data(df, jenis):
             writer,
             index=False
         )
+    st.success(f"Excel berhasil disimpan ke {file_path}")
 
 
 # ================= LOAD DATA =================
